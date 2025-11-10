@@ -2,35 +2,109 @@
 import { NextRequest, NextResponse } from "next/server";
 import OpenAI from "openai";
 
+type Business = {
+  id: string;
+  name: string;
+};
+
+type Service = {
+  id: string;
+  name: string;
+  business_id: string;
+};
+
+type AvailabilitySlot = {
+  start?: string;
+  time?: string;
+} | string;
+
+type ModelIntent = "check_availability" | "create_booking" | "small_talk";
+
+type ModelResponse = {
+  intent: ModelIntent;
+  service?: string;
+  date?: string;
+};
+
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
 
-// helper to fetch services from your own API
-async function fetchServices() {
-  const res = await fetch(`${process.env.NEXT_PUBLIC_BASE_URL || ""}/api/services`, {
-    method: "GET",
-    cache: "no-store",
-  });
-  if (!res.ok) return [];
-  return res.json();
+function resolveApiUrl(path: string, base: string) {
+  return new URL(path, base).toString();
 }
 
-// helper to fetch availability from your own API
-async function fetchAvailability(serviceId: string, date?: string) {
-  const params = new URLSearchParams();
-  params.set("serviceId", serviceId);
-  if (date) params.set("date", date);
-
-  const res = await fetch(
-    `${process.env.NEXT_PUBLIC_BASE_URL || ""}/api/availability?${params.toString()}`,
-    {
+async function fetchBusinesses(baseUrl: string): Promise<Business[]> {
+  try {
+    const res = await fetch(resolveApiUrl("/api/businesses", baseUrl), {
       method: "GET",
       cache: "no-store",
+    });
+
+    if (!res.ok) {
+      return [];
     }
-  );
-  if (!res.ok) return [];
-  return res.json();
+
+    return res.json();
+  } catch (error) {
+    console.error("Failed to fetch businesses", error);
+    return [];
+  }
+}
+
+async function fetchServices(baseUrl: string, businessId?: string): Promise<Service[]> {
+  try {
+    const url = new URL(resolveApiUrl("/api/services", baseUrl));
+    if (businessId) {
+      url.searchParams.set("business_id", businessId);
+    }
+
+    const res = await fetch(url.toString(), {
+      method: "GET",
+      cache: "no-store",
+    });
+
+    if (!res.ok) {
+      return [];
+    }
+
+    return res.json();
+  } catch (error) {
+    console.error("Failed to fetch services", error);
+    return [];
+  }
+}
+
+async function fetchAvailability(
+  baseUrl: string,
+  businessId: string,
+  serviceId: string,
+  date: string
+): Promise<AvailabilitySlot[]> {
+  try {
+    const url = new URL(resolveApiUrl("/api/availability", baseUrl));
+    url.searchParams.set("business_id", businessId);
+    url.searchParams.set("service_id", serviceId);
+    url.searchParams.set("date", date);
+
+    const res = await fetch(url.toString(), {
+      method: "GET",
+      cache: "no-store",
+    });
+
+    if (!res.ok) {
+      return [];
+    }
+
+    return res.json();
+  } catch (error) {
+    console.error("Failed to fetch availability", error);
+    return [];
+  }
+}
+
+function isModelIntent(value: unknown): value is ModelIntent {
+  return value === "check_availability" || value === "create_booking" || value === "small_talk";
 }
 
 export async function POST(req: NextRequest) {
@@ -41,103 +115,151 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "No message" }, { status: 400 });
     }
 
-    // 1. Ask OpenAI what the user wants
+    const baseUrl = req.nextUrl?.origin ?? req.url;
+
+    const businesses = await fetchBusinesses(baseUrl);
+    const business = businesses[0] ?? null;
+
+    const services = await fetchServices(baseUrl, business?.id);
+    const serviceNames = services.map(service => service.name).join(", ");
+
+    const today = new Date();
+    const defaultDate = today.toISOString().slice(0, 10);
+
+    if (!process.env.OPENAI_API_KEY) {
+      return NextResponse.json({
+        ok: false,
+        reply: "A chave da OpenAI não está configurada. Configure OPENAI_API_KEY e tente novamente.",
+      }, { status: 500 });
+    }
+
     const completion = await openai.chat.completions.create({
       model: "gpt-4o-mini",
+      temperature: 0.2,
       messages: [
         {
           role: "system",
           content:
-            "You are a scheduler bot. You read the user's message and decide the intent. You speak Portuguese. You are a friendly and bubbly customer service rep. Valid intents: check_availability, create_booking, small_talk. Always return JSON."
+            "Você é uma atendente de salão de beleza muito simpática. Entenda a intenção do cliente e responda apenas com JSON." +
+            " Intenções válidas: check_availability, create_booking, small_talk." +
+            " Serviços disponíveis: " + (serviceNames || "nenhum serviço cadastrado") +
+            ". Para check_availability, inclua {\"intent\":\"check_availability\", \"service\":\"nome do serviço\", \"date\":\"YYYY-MM-DD\"}." +
+            " Se o cliente não informar data, escolha o próximo dia útil nesse formato.",
         },
         {
           role: "user",
-          content: `User said: "${message}". Return JSON only.`,
+          content: `Mensagem do cliente: "${message}". Responda apenas com JSON válido.`,
         },
       ],
-      temperature: 0.2,
     });
 
-    const raw = completion.choices[0].message.content ?? "{}";
-    let parsed: any = {};
+    const raw = completion.choices[0]?.message?.content ?? "{}";
+
+    const defaultParsed: ModelResponse = { intent: "small_talk" };
+    let parsed: ModelResponse = defaultParsed;
+    let modelOutput: Record<string, unknown> | null = null;
+
     try {
-      parsed = JSON.parse(raw);
-    } catch (e) {
-      parsed = { intent: "small_talk" };
+      const candidate = JSON.parse(raw) as Record<string, unknown>;
+      modelOutput = candidate;
+      parsed = {
+        intent: isModelIntent(candidate.intent) ? candidate.intent : "small_talk",
+        service: typeof candidate.service === "string" ? candidate.service : undefined,
+        date: typeof candidate.date === "string" ? candidate.date : undefined,
+      };
+    } catch (error) {
+      console.warn("Failed to parse model response", raw, error);
     }
 
-    // 2. Get services from your API
-    const services = await fetchServices();
+    if (!Array.isArray(services) || services.length === 0) {
+      return NextResponse.json({
+        ok: true,
+        modelOutput: modelOutput ?? parsed,
+        reply: "Ainda não temos serviços cadastrados. Cadastre um serviço para começar a atender seus clientes!",
+      });
+    }
 
-    // Try to match a service by name if the model returned one
-    let chosenService: any = null;
-    if (parsed.service && Array.isArray(services)) {
-      const lower = parsed.service.toLowerCase();
+    let chosenService: Service | null = null;
+    if (parsed.service) {
+      const lower = String(parsed.service).toLowerCase();
       chosenService =
-        services.find((s: any) => s.name?.toLowerCase() === lower) ||
-        services.find((s: any) => s.name?.toLowerCase().includes(lower));
+        services.find(service => service.name?.toLowerCase() === lower) ||
+        services.find(service => service.name?.toLowerCase().includes(lower)) ||
+        null;
     }
 
-    // If intent is check_availability
     if (parsed.intent === "check_availability") {
-      if (!chosenService && Array.isArray(services) && services.length === 1) {
+      if (!chosenService && services.length === 1) {
         chosenService = services[0];
       }
 
       if (!chosenService) {
-        const list = services.map((s: any) => `• ${s.name}`).join("\n");
+        const list = services.map(service => `• ${service.name}`).join("\n");
         return NextResponse.json({
           ok: true,
-          modelOutput: parsed,
-          reply: `Which service do you want?\n${list}`,
+          modelOutput: modelOutput ?? parsed,
+          reply: `Qual serviço você quer?\n${list}`,
         });
       }
 
-      // 3. Fetch availability for that service
-      const availability = await fetchAvailability(chosenService.id, parsed.date);
+      if (!business) {
+        return NextResponse.json({
+          ok: false,
+          modelOutput: modelOutput ?? parsed,
+          reply: "Não consegui identificar o salão. Tente novamente mais tarde.",
+        });
+      }
+
+      const date = typeof parsed.date === "string" && parsed.date ? parsed.date : defaultDate;
+
+      const availability = await fetchAvailability(baseUrl, business.id, chosenService.id, date);
 
       if (!availability || availability.length === 0) {
         return NextResponse.json({
           ok: true,
-          modelOutput: parsed,
-          reply: `I did not find availability for ${chosenService.name} on that date. Try another day.`,
+          modelOutput: modelOutput ?? parsed,
+          reply: `Não encontrei horários disponíveis para ${chosenService.name} em ${date}. Vamos tentar outro dia?`,
         });
       }
 
-      const firstSlots = availability.slice(0, 4).map((slot: any) => {
-        const start = slot.start || slot.time || slot;
-        return `• ${start}`;
+      const formatter = new Intl.DateTimeFormat("pt-BR", {
+        hour: "2-digit",
+        minute: "2-digit",
       });
+
+      const firstSlots = availability.slice(0, 4).map(slot => {
+        const start = typeof slot === "string" ? slot : slot.start || slot.time;
+        const slotDate = start ? new Date(start) : null;
+        return slotDate ? `• ${formatter.format(slotDate)}` : "";
+      }).filter(Boolean);
 
       return NextResponse.json({
         ok: true,
-        modelOutput: parsed,
+        modelOutput: modelOutput ?? parsed,
         reply:
-          `Here are the next times for ${chosenService.name}:\n` +
+          `Aqui estão os próximos horários para ${chosenService.name} em ${date}:\n` +
           firstSlots.join("\n") +
-          `\nReply with a time to book.`,
+          `\nResponda com o horário desejado para agendar.`,
       });
     }
 
-    // If intent is create_booking
     if (parsed.intent === "create_booking") {
-      // Later you will call your /api/bookings here.
       return NextResponse.json({
         ok: true,
-        modelOutput: parsed,
-        reply: `Ok. I will create a booking for ${parsed.date || "the next available time"}. (Booking call not wired yet.)`,
+        modelOutput: modelOutput ?? parsed,
+        reply: `Perfeito! Vou preparar o agendamento para ${parsed.date || "o próximo horário disponível"}. (Integração de agendamento em breve.)`,
       });
     }
 
-    // fallback
     return NextResponse.json({
       ok: true,
-      modelOutput: parsed,
-      reply: "Hi. I can show services, show availability and book. Try: Do you have availability for haircut tomorrow?",
+      modelOutput: modelOutput ?? parsed,
+      reply:
+        "Oi! Posso te mostrar nossos serviços, horários disponíveis e fazer reservas. Pergunte algo como: \"Vocês têm horário para corte amanhã?\"",
     });
   } catch (err) {
     console.error(err);
     return NextResponse.json({ ok: false, error: "server error" }, { status: 500 });
   }
 }
-    
+

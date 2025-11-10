@@ -37,7 +37,8 @@ export default function WhatsAppSimPage() {
       };
 
       setMessages(prev => [...prev, botMsg]);
-    } catch (e) {
+    } catch (error) {
+      console.error("Failed to call WhatsApp sim API", error);
       setMessages(prev => [
         ...prev,
         { role: "bot", content: "Error talking to API." },
