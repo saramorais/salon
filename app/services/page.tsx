@@ -2,6 +2,11 @@
 
 import { useEffect, useState } from "react";
 
+type Business = {
+  id: string;
+  name: string;
+};
+
 type Service = {
   id: string;
   name: string;
@@ -10,52 +15,65 @@ type Service = {
   business_id: string | null;
 };
 
-type Business = {
-  id: string;
-  name: string;
-};
-
 export default function ServicesPage() {
-  const [services, setServices] = useState<Service[]>([]);
   const [businesses, setBusinesses] = useState<Business[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [selectedBusiness, setSelectedBusiness] = useState<string>("");
+  const [services, setServices] = useState<Service[]>([]);
+  const [loading, setLoading] = useState(false);
 
   const [name, setName] = useState("");
   const [price, setPrice] = useState("");
   const [duration, setDuration] = useState("");
-  const [selectedBusiness, setSelectedBusiness] = useState<string>("");
 
-  async function fetchServices(businessId?: string) {
-    // for now we fetch all and filter on client, later we make a query param
-    const res = await fetch("/api/services");
-    const data = await res.json();
-    if (businessId) {
-      setServices(data.filter((s: Service) => s.business_id === businessId));
-    } else {
-      setServices(data);
+  // load businesses first
+  useEffect(() => {
+    async function loadBusinesses() {
+      const res = await fetch("/api/businesses");
+      const data = await res.json();
+      setBusinesses(data);
+
+      // auto-select first business
+      if (data.length > 0) {
+        setSelectedBusiness(data[0].id);
+      }
     }
-    setLoading(false);
-  }
+    loadBusinesses();
+  }, []);
 
-  async function fetchBusinesses() {
-    const res = await fetch("/api/businesses");
-    const data = await res.json();
-    setBusinesses(data);
-    // if you want, select the first one automatically
-    if (data.length > 0) {
-      setSelectedBusiness(data[0].id);
-      fetchServices(data[0].id);
+  // whenever selectedBusiness changes, fetch services for it
+  useEffect(() => {
+    if (!selectedBusiness) {
+      setServices([]);
       return;
     }
-    fetchServices();
-  }
+    fetchServices(selectedBusiness);
+  }, [selectedBusiness]);
 
-  useEffect(() => {
-    fetchBusinesses();
-  }, []);
+  async function fetchServices(businessId: string) {
+    setLoading(true);
+    try {
+      const res = await fetch(`/api/services?business_id=${businessId}`);
+      const data = await res.json();
+      if (Array.isArray(data)) {
+        setServices(data);
+      } else {
+        setServices([]);
+        console.error("Expected array, got:", data);
+      }
+    } catch (err) {
+      console.error(err);
+      setServices([]);
+    } finally {
+      setLoading(false);
+    }
+  }
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
+    if (!selectedBusiness) {
+      alert("Select a business first");
+      return;
+    }
 
     const res = await fetch("/api/services", {
       method: "POST",
@@ -64,40 +82,39 @@ export default function ServicesPage() {
         name,
         price: price ? Number(price) : null,
         duration_minutes: duration ? Number(duration) : null,
-        business_id: selectedBusiness || null
+        business_id: selectedBusiness
       })
     });
 
     const data = await res.json();
 
-    if (res.ok) {
-      setName("");
-      setPrice("");
-      setDuration("");
-      fetchServices(selectedBusiness);
-    } else {
+    if (!res.ok) {
       alert(data.error ?? "Error creating service");
+      return;
     }
-  }
 
-  function handleBusinessChange(id: string) {
-    setSelectedBusiness(id);
-    fetchServices(id);
+    // clear
+    setName("");
+    setPrice("");
+    setDuration("");
+
+    // reload for this business
+    fetchServices(selectedBusiness);
   }
 
   return (
     <main style={{ padding: "1.5rem", maxWidth: 700 }}>
       <h1>Services</h1>
 
-      <div style={{ marginTop: "1rem", marginBottom: "1rem" }}>
+      <div style={{ margin: "1rem 0" }}>
         <label>
           Business:
           <select
             value={selectedBusiness}
-            onChange={(e) => handleBusinessChange(e.target.value)}
+            onChange={(e) => setSelectedBusiness(e.target.value)}
             style={{ marginLeft: "0.5rem", padding: "0.25rem" }}
           >
-            {businesses.length === 0 ? <option value="">No businesses</option> : null}
+            {businesses.length === 0 && <option>No businesses</option>}
             {businesses.map((b) => (
               <option key={b.id} value={b.id}>
                 {b.name}
@@ -107,7 +124,10 @@ export default function ServicesPage() {
         </label>
       </div>
 
-      <form onSubmit={handleSubmit} style={{ display: "grid", gap: "0.75rem", marginBottom: "2rem" }}>
+      <form
+        onSubmit={handleSubmit}
+        style={{ display: "grid", gap: "0.75rem", marginBottom: "2rem" }}
+      >
         <input
           value={name}
           onChange={(e) => setName(e.target.value)}
@@ -136,13 +156,16 @@ export default function ServicesPage() {
       </form>
 
       {loading ? (
-        <p>Loading...</p>
+        <p>Loading services…</p>
       ) : services.length === 0 ? (
-        <p>No services for this business.</p>
+        <p>No services for this business yet.</p>
       ) : (
         <ul style={{ display: "grid", gap: "1rem" }}>
           {services.map((service) => (
-            <li key={service.id} style={{ border: "1px solid #eee", borderRadius: 8, padding: "1rem" }}>
+            <li
+              key={service.id}
+              style={{ border: "1px solid #eee", borderRadius: 8, padding: "1rem" }}
+            >
               <h2>{service.name}</h2>
               {service.price ? <p>R$ {service.price}</p> : <p>Price not set</p>}
               {service.duration_minutes ? <p>{service.duration_minutes} min</p> : null}
