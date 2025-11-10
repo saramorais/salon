@@ -2,14 +2,24 @@
 
 import { useEffect, useState } from "react";
 
+type Business = {
+  id: string;
+  name: string;
+};
+
+type Service = {
+  id: string;
+  name: string;
+};
+
 export default function AvailabilityPage() {
   const [businessId, setBusinessId] = useState("");
   const [serviceId, setServiceId] = useState("");
   const [date, setDate] = useState("2025-11-10");
   const [slots, setSlots] = useState<string[]>([]);
 
-  const [businesses, setBusinesses] = useState<any[]>([]);
-  const [services, setServices] = useState<any[]>([]);
+  const [businesses, setBusinesses] = useState<Business[]>([]);
+  const [services, setServices] = useState<Service[]>([]);
 
   useEffect(() => {
     async function load() {
@@ -21,8 +31,12 @@ export default function AvailabilityPage() {
       const bData = await bRes.json();
       const sData = await sRes.json();
 
-      const businessList = Array.isArray(bData) ? bData : [];
-      const serviceList = Array.isArray(sData) ? sData : [];
+      const businessList: Business[] = Array.isArray(bData)
+        ? bData.map((item: Business) => ({ id: item.id, name: item.name }))
+        : [];
+      const serviceList: Service[] = Array.isArray(sData)
+        ? sData.map((item: Service) => ({ id: item.id, name: item.name }))
+        : [];
 
       setBusinesses(businessList);
       setServices(serviceList);

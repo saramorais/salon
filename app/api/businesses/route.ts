@@ -1,7 +1,14 @@
 import { NextResponse } from "next/server";
 import { supabase } from "@/lib/supabaseClient";
+import { ensureSampleData } from "@/lib/sampleData";
 
 export async function GET() {
+  try {
+    await ensureSampleData();
+  } catch (error) {
+    console.error("Failed to seed sample data", error);
+  }
+
   const { data, error } = await supabase.from("businesses").select("*").order("created_at", { ascending: false });
 
   if (error) {
