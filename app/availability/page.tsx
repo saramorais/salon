@@ -21,11 +21,14 @@ export default function AvailabilityPage() {
       const bData = await bRes.json();
       const sData = await sRes.json();
 
-      setBusinesses(bData);
-      setServices(sData);
+      const businessList = Array.isArray(bData) ? bData : [];
+      const serviceList = Array.isArray(sData) ? sData : [];
 
-      if (bData.length > 0) setBusinessId(bData[0].id);
-      if (sData.length > 0) setServiceId(sData[0].id);
+      setBusinesses(businessList);
+      setServices(serviceList);
+
+      if (businessList.length > 0) setBusinessId(businessList[0].id);
+      if (serviceList.length > 0) setServiceId(serviceList[0].id);
     }
     load();
   }, []);
@@ -36,7 +39,7 @@ export default function AvailabilityPage() {
       `/api/availability?business_id=${businessId}&service_id=${serviceId}&date=${date}`
     );
     const data = await res.json();
-    setSlots(data);
+    setSlots(Array.isArray(data) ? data : []);
   }
 
   return (
