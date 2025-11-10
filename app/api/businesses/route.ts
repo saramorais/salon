@@ -9,8 +9,11 @@ export async function GET() {
     console.error("Failed to seed sample data", error);
   }
 
-  const { data, error } = await supabase.from("businesses").select("*").order("created_at", { ascending: false });
-
+  const { data, error } = await supabase
+    .from("businesses")
+    .select("*")
+    .order("name", { ascending: true });
+    
   if (error) {
     return NextResponse.json({ error: error.message }, { status: 500 });
   }

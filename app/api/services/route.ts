@@ -11,7 +11,7 @@ export async function GET(req: Request) {
     query = query.eq("business_id", businessId);
   }
 
-  const { data, error } = await query.order("created_at", { ascending: false });
+  const { data, error } = await query.order("name", { ascending: true });
 
   if (error) {
     return NextResponse.json({ error: error.message }, { status: 500 });

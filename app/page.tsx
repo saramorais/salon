@@ -35,6 +35,16 @@ export default function Home() {
             See generated time slots.
           </p>
         </li>
+
+
+        <li>
+          <Link href="/whatsapp-sim" style={{ textDecoration: "underline" }}>
+            WhatsApp test
+          </Link>
+          <p style={{ fontSize: "0.85rem", color: "#666" }}>
+            Simulate messaging
+          </p>
+        </li>
       </ul>
     </main>
   );
