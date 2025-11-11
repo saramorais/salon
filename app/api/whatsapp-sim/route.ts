@@ -177,7 +177,7 @@ Se o cliente não disser data, use o próximo dia útil como "date".
 
     const raw = interpretation.choices[0]?.message?.content ?? "{}";
 
-    let parsed: ModelResponse = { intent: "small_talk" };
+    const parsed: ModelResponse = { intent: "small_talk" };
     try {
       const match = raw.match(/{[\s\S]*}/);
       const json = match ? match[0] : raw;
@@ -185,8 +185,8 @@ Se o cliente não disser data, use o próximo dia útil como "date".
       if (isModelIntent(obj.intent)) parsed.intent = obj.intent;
       if (typeof obj.service === "string") parsed.service = obj.service;
       if (typeof obj.date === "string") parsed.date = obj.date;
-    } catch (err) {
-      console.warn("Erro ao interpretar JSON:", raw);
+    } catch (error) {
+      console.warn("Erro ao interpretar JSON:", raw, error);
     }
 
     // -------- Handle logic -------------
