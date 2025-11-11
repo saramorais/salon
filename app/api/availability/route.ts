@@ -1,122 +1,101 @@
-import { NextResponse } from "next/server";
+// app/api/availability/route.ts
+import { NextRequest, NextResponse } from "next/server";
 import { supabase } from "@/lib/supabaseClient";
 
-/**
- * GET /api/availability?business_id=...&service_id=...&date=2025-11-10
- */
-export async function GET(req: Request) {
+function toISO(date: string, time: string) {
+  return new Date(`${date}T${time}:00`).toISOString();
+}
+
+export async function GET(req: NextRequest) {
   const { searchParams } = new URL(req.url);
   const businessId = searchParams.get("business_id");
   const serviceId = searchParams.get("service_id");
+  const professionalId = searchParams.get("professional_id");
   const date = searchParams.get("date"); // YYYY-MM-DD
 
-  if (!businessId || !serviceId || !date) {
-    return NextResponse.json(
-      { error: "business_id, service_id and date are required" },
-      { status: 400 }
-    );
+  if (!businessId || !serviceId || !professionalId || !date) {
+    return NextResponse.json({ error: "missing params" }, { status: 400 });
   }
 
-  // 1. get service to know duration
+  // 1. service
   const { data: service, error: serviceError } = await supabase
     .from("services")
-    .select("duration_minutes")
+    .select("*")
     .eq("id", serviceId)
     .single();
 
   if (serviceError || !service) {
-    return NextResponse.json(
-      { error: "Service not found" },
-      { status: 404 }
-    );
+    return NextResponse.json({ error: "service not found" }, { status: 404 });
   }
 
-  const duration = service.duration_minutes || 60;
+  const durationMin = service.duration_min || 30;
 
-  // 2. get business hours for that weekday
-  const weekday = new Date(date).getDay(); // 0 sunday ... 6 saturday
+  // weekday 1..7
+  const weekday = new Date(date).getDay(); // 0..6
+  const weekdayPg = weekday === 0 ? 7 : weekday; // Sunday = 7
 
-  const { data: hours, error: hoursError } = await supabase
-    .from("business_hours")
+  // 2. rules for professional
+  const { data: rules } = await supabase
+    .from("availability_rules")
     .select("*")
-    .eq("business_id", businessId)
-    .eq("weekday", weekday);
+    .eq("professional_id", professionalId)
+    .eq("weekday", weekdayPg);
 
-  if (hoursError) {
-    return NextResponse.json(
-      { error: hoursError.message },
-      { status: 500 }
-    );
-  }
+  // 3. exceptions
+  const { data: exceptions } = await supabase
+    .from("availability_exceptions")
+    .select("*")
+    .eq("professional_id", professionalId)
+    .eq("date", date);
 
-  if (!hours || hours.length === 0) {
-    return NextResponse.json([], { status: 200 });
-  }
+  // 4. bookings for that day
+  const startOfDay = date + "T00:00:00Z";
+  const endOfDay = date + "T23:59:59Z";
 
-  // For now assume one block per day
-  const bh = hours[0];
-
-  // 3. get existing bookings for that date
-  // we will fetch all bookings for this business on that day
-  const startOfDay = new Date(date + "T00:00:00Z").toISOString();
-  const endOfDay = new Date(date + "T23:59:59Z").toISOString();
-
-  const { data: bookings, error: bookingsError } = await supabase
+  const { data: bookings } = await supabase
     .from("bookings")
-    .select("start_at, end_at")
-    .eq("business_id", businessId)
+    .select("*")
+    .eq("professional_id", professionalId)
     .gte("start_at", startOfDay)
-    .lte("start_at", endOfDay);
+    .lte("start_at", endOfDay)
+    .eq("status", "confirmed");
 
-  if (bookingsError) {
-    return NextResponse.json(
-      { error: bookingsError.message },
-      { status: 500 }
-    );
+  // now build slots from rules
+  const slots: { start: string }[] = [];
+
+  for (const rule of rules || []) {
+    const slotSize = rule.slot_size_min || 30;
+    // check exceptions
+    const isClosed = (exceptions || []).some(exc => exc.is_closed);
+    if (isClosed) continue;
+
+    const startTime = rule.start_time; // "09:00:00"
+    const endTime = rule.end_time;     // "17:00:00"
+
+    let current = new Date(`${date}T${startTime}`);
+    const end = new Date(`${date}T${endTime}`);
+
+    while (current < end) {
+      const slotStartIso = current.toISOString();
+      const slotEnd = new Date(current.getTime() + durationMin * 60000);
+
+      // check conflict with bookings
+      const conflict = (bookings || []).some(b => {
+        const bStart = new Date(b.start_at).getTime();
+        const bEnd = new Date(b.end_at).getTime();
+        return (
+          (current.getTime() >= bStart && current.getTime() < bEnd) ||
+          (slotEnd.getTime() > bStart && slotEnd.getTime() <= bEnd)
+        );
+      });
+
+      if (!conflict) {
+        slots.push({ start: slotStartIso });
+      }
+
+      current = new Date(current.getTime() + slotSize * 60000);
+    }
   }
 
-  // 4. generate slots
-  const slots = generateSlots(date, bh.start_time, bh.end_time, duration);
-
-  // 5. filter out slots that collide with bookings
-  const available = slots.filter((slot) => {
-    const slotStart = new Date(slot);
-    const slotEnd = new Date(slotStart.getTime() + duration * 60 * 1000);
-
-    const overlaps = bookings?.some((b) => {
-      const bStart = new Date(b.start_at);
-      const bEnd = new Date(b.end_at);
-      return slotStart < bEnd && slotEnd > bStart;
-    });
-
-    return !overlaps;
-  });
-
-  return NextResponse.json(available, { status: 200 });
-}
-
-function generateSlots(
-  date: string,
-  startTime: string,
-  endTime: string,
-  duration: number
-): string[] {
-  const [startHour, startMinute] = startTime.split(":").map(Number);
-  const [endHour, endMinute] = endTime.split(":").map(Number);
-
-  const start = new Date(date);
-  start.setUTCHours(startHour, startMinute, 0, 0);
-
-  const end = new Date(date);
-  end.setUTCHours(endHour, endMinute, 0, 0);
-
-  const slots: string[] = [];
-
-  let current = new Date(start);
-  while (current < end) {
-    slots.push(new Date(current).toISOString());
-    current = new Date(current.getTime() + duration * 60 * 1000);
-  }
-
-  return slots;
+  return NextResponse.json(slots);
 }

@@ -23,7 +23,7 @@ export async function GET() {
 
 export async function POST(req: Request) {
   const body = await req.json();
-  const { name, whatsapp_number } = body;
+  const { name } = body;
 
   if (!name) {
     return NextResponse.json({ error: "Name is required" }, { status: 400 });
@@ -33,7 +33,7 @@ export async function POST(req: Request) {
     .from("businesses")
     .insert({
       name,
-      whatsapp_number
+      
     })
     .select()
     .single();

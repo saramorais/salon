@@ -1,6 +1,4 @@
-// app/whatsapp-sim/page.tsx
 "use client";
-
 import { useState } from "react";
 
 type ChatMessage = {
@@ -10,13 +8,15 @@ type ChatMessage = {
 
 export default function WhatsAppSimPage() {
   const [messages, setMessages] = useState<ChatMessage[]>([
-    { role: "bot", content: "Hi. Send me a message like: Do you have availability tomorrow?" },
+    { role: "bot", content: "Olá! Como posso te ajudar?" },
   ]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
+  const [context, setContext] = useState<{ service?: string; date?: string }>({});
 
   async function handleSend() {
     if (!input.trim()) return;
+
     const userMsg: ChatMessage = { role: "user", content: input };
     setMessages(prev => [...prev, userMsg]);
     setInput("");
@@ -26,22 +26,26 @@ export default function WhatsAppSimPage() {
       const res = await fetch("/api/whatsapp-sim", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message: userMsg.content }),
+        body: JSON.stringify({ message: userMsg.content, context }),
       });
 
       const data = await res.json();
+
+      // if the backend extracted new info, store it
+      if (data.context) {
+        setContext(data.context);
+      }
 
       const botMsg: ChatMessage = {
         role: "bot",
         content: data.reply ?? "No reply",
       };
-
       setMessages(prev => [...prev, botMsg]);
     } catch (error) {
       console.error("Failed to call WhatsApp sim API", error);
       setMessages(prev => [
         ...prev,
-        { role: "bot", content: "Error talking to API." },
+        { role: "bot", content: "Erro ao conectar ao servidor." },
       ]);
     } finally {
       setLoading(false);
@@ -67,7 +71,7 @@ export default function WhatsAppSimPage() {
           ))}
           {loading && (
             <div className="self-start bg-gray-200 px-3 py-2 rounded-xl">
-              typing...
+              digitando...
             </div>
           )}
         </div>
@@ -76,17 +80,15 @@ export default function WhatsAppSimPage() {
             className="flex-1 border rounded px-2 py-1"
             value={input}
             onChange={e => setInput(e.target.value)}
-            onKeyDown={e => {
-              if (e.key === "Enter") handleSend();
-            }}
-            placeholder="Type a WhatsApp message..."
+            onKeyDown={e => e.key === "Enter" && handleSend()}
+            placeholder="Digite uma mensagem..."
           />
           <button
             onClick={handleSend}
             disabled={loading}
             className="bg-emerald-500 text-white px-4 py-1 rounded"
           >
-            Send
+            Enviar
           </button>
         </div>
       </div>

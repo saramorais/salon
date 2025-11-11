@@ -40,11 +40,7 @@ async function fetchBusinesses(baseUrl: string): Promise<Business[]> {
       method: "GET",
       cache: "no-store",
     });
-
-    if (!res.ok) {
-      return [];
-    }
-
+    if (!res.ok) return [];
     return res.json();
   } catch (error) {
     console.error("Failed to fetch businesses", error);
@@ -55,19 +51,12 @@ async function fetchBusinesses(baseUrl: string): Promise<Business[]> {
 async function fetchServices(baseUrl: string, businessId?: string): Promise<Service[]> {
   try {
     const url = new URL(resolveApiUrl("/api/services", baseUrl));
-    if (businessId) {
-      url.searchParams.set("business_id", businessId);
-    }
-
+    if (businessId) url.searchParams.set("business_id", businessId);
     const res = await fetch(url.toString(), {
       method: "GET",
       cache: "no-store",
     });
-
-    if (!res.ok) {
-      return [];
-    }
-
+    if (!res.ok) return [];
     return res.json();
   } catch (error) {
     console.error("Failed to fetch services", error);
@@ -86,16 +75,11 @@ async function fetchAvailability(
     url.searchParams.set("business_id", businessId);
     url.searchParams.set("service_id", serviceId);
     url.searchParams.set("date", date);
-
     const res = await fetch(url.toString(), {
       method: "GET",
       cache: "no-store",
     });
-
-    if (!res.ok) {
-      return [];
-    }
-
+    if (!res.ok) return [];
     return res.json();
   } catch (error) {
     console.error("Failed to fetch availability", error);
@@ -104,122 +88,158 @@ async function fetchAvailability(
 }
 
 function isModelIntent(value: unknown): value is ModelIntent {
-  return value === "check_availability" || value === "create_booking" || value === "small_talk";
+  return (
+    value === "check_availability" ||
+    value === "create_booking" ||
+    value === "small_talk"
+  );
+}
+
+// Helper: make a natural reply
+async function generateFriendlyReply(context: string) {
+  try {
+    const completion = await openai.chat.completions.create({
+      model: "gpt-4o-mini",
+      temperature: 0.7,
+      messages: [
+        {
+          role: "system",
+          content: `
+Você é *Luna*, atendente do salão Joylua.
+Seu estilo é simpático e natural — como uma conversa no WhatsApp.
+Seja breve e agradável, em português. Evite linguagem robótica.
+`,
+        },
+        {
+          role: "user",
+          content: `Escreva uma mensagem amigável com base neste contexto:\n${context}`,
+        },
+      ],
+    });
+
+    return completion.choices[0]?.message?.content?.trim() || context;
+  } catch (err) {
+    console.error("Erro ao gerar resposta amigável:", err);
+    return context;
+  }
 }
 
 export async function POST(req: NextRequest) {
   try {
     const { message } = await req.json();
-
     if (!message) {
       return NextResponse.json({ error: "No message" }, { status: 400 });
     }
 
     const baseUrl = req.nextUrl?.origin ?? req.url;
-
     const businesses = await fetchBusinesses(baseUrl);
     const business = businesses[0] ?? null;
 
     const services = await fetchServices(baseUrl, business?.id);
-    const serviceNames = services.map(service => service.name).join(", ");
-
+    const serviceNames = services.map(s => s.name).join(", ");
     const today = new Date();
     const defaultDate = today.toISOString().slice(0, 10);
 
     if (!process.env.OPENAI_API_KEY) {
       return NextResponse.json({
         ok: false,
-        reply: "A chave da OpenAI não está configurada. Configure OPENAI_API_KEY e tente novamente.",
-      }, { status: 500 });
+        reply: "A chave da OpenAI não está configurada.",
+      });
     }
 
-    const completion = await openai.chat.completions.create({
+    // -------- First call: interpret user -------------
+    const interpretation = await openai.chat.completions.create({
       model: "gpt-4o-mini",
-      temperature: 0.2,
+      temperature: 0.3,
       messages: [
         {
           role: "system",
-          content:
-            "Você é uma atendente de salão de beleza muito simpática. Entenda a intenção do cliente e responda apenas com JSON." +
-            " Intenções válidas: check_availability, create_booking, small_talk." +
-            " Serviços disponíveis: " + (serviceNames || "nenhum serviço cadastrado") +
-            ". Para check_availability, inclua {\"intent\":\"check_availability\", \"service\":\"nome do serviço\", \"date\":\"YYYY-MM-DD\"}." +
-            " Se o cliente não informar data, escolha o próximo dia útil nesse formato.",
+          content: `
+Você é uma atendente de salão de beleza chamada Luna.
+Seu trabalho é entender o que o cliente quer.
+Responda SOMENTE com JSON válido. Nada além disso.
+
+Campos:
+{
+  "intent": "check_availability" | "create_booking" | "small_talk",
+  "service": "nome do serviço se mencionado" (opcional),
+  "date": "YYYY-MM-DD" (opcional)
+}
+
+Serviços disponíveis: ${serviceNames || "nenhum serviço cadastrado"}.
+Hoje é ${defaultDate}.
+Se o cliente não disser data, use o próximo dia útil como "date".
+`,
         },
-        {
-          role: "user",
-          content: `Mensagem do cliente: "${message}". Responda apenas com JSON válido.`,
-        },
+        { role: "user", content: message },
       ],
     });
 
-    const raw = completion.choices[0]?.message?.content ?? "{}";
+    const raw = interpretation.choices[0]?.message?.content ?? "{}";
 
-    const defaultParsed: ModelResponse = { intent: "small_talk" };
-    let parsed: ModelResponse = defaultParsed;
-    let modelOutput: Record<string, unknown> | null = null;
-
+    let parsed: ModelResponse = { intent: "small_talk" };
     try {
-      const candidate = JSON.parse(raw) as Record<string, unknown>;
-      modelOutput = candidate;
-      parsed = {
-        intent: isModelIntent(candidate.intent) ? candidate.intent : "small_talk",
-        service: typeof candidate.service === "string" ? candidate.service : undefined,
-        date: typeof candidate.date === "string" ? candidate.date : undefined,
-      };
-    } catch (error) {
-      console.warn("Failed to parse model response", raw, error);
+      const match = raw.match(/{[\s\S]*}/);
+      const json = match ? match[0] : raw;
+      const obj = JSON.parse(json);
+      if (isModelIntent(obj.intent)) parsed.intent = obj.intent;
+      if (typeof obj.service === "string") parsed.service = obj.service;
+      if (typeof obj.date === "string") parsed.date = obj.date;
+    } catch (err) {
+      console.warn("Erro ao interpretar JSON:", raw);
     }
 
+    // -------- Handle logic -------------
     if (!Array.isArray(services) || services.length === 0) {
-      return NextResponse.json({
-        ok: true,
-        modelOutput: modelOutput ?? parsed,
-        reply: "Ainda não temos serviços cadastrados. Cadastre um serviço para começar a atender seus clientes!",
-      });
+      const friendly = await generateFriendlyReply(
+        "Ainda não há serviços cadastrados. Peça para o dono do salão adicionar um serviço para começar os agendamentos."
+      );
+      return NextResponse.json({ ok: true, reply: friendly });
     }
 
     let chosenService: Service | null = null;
     if (parsed.service) {
-      const lower = String(parsed.service).toLowerCase();
+      const lower = parsed.service.toLowerCase();
       chosenService =
-        services.find(service => service.name?.toLowerCase() === lower) ||
-        services.find(service => service.name?.toLowerCase().includes(lower)) ||
+        services.find(s => s.name?.toLowerCase() === lower) ||
+        services.find(s => s.name?.toLowerCase().includes(lower)) ||
         null;
     }
 
+    // ---- Check Availability ----
     if (parsed.intent === "check_availability") {
       if (!chosenService && services.length === 1) {
         chosenService = services[0];
       }
 
       if (!chosenService) {
-        const list = services.map(service => `• ${service.name}`).join("\n");
-        return NextResponse.json({
-          ok: true,
-          modelOutput: modelOutput ?? parsed,
-          reply: `Qual serviço você quer?\n${list}`,
-        });
+        const list = services.map(s => `• ${s.name}`).join("\n");
+        const friendly = await generateFriendlyReply(
+          `O cliente quer ver horários, mas ainda não escolheu o serviço. Liste as opções:\n${list}`
+        );
+        return NextResponse.json({ ok: true, reply: friendly });
       }
 
       if (!business) {
-        return NextResponse.json({
-          ok: false,
-          modelOutput: modelOutput ?? parsed,
-          reply: "Não consegui identificar o salão. Tente novamente mais tarde.",
-        });
+        const friendly = await generateFriendlyReply(
+          "Não consegui identificar o salão no sistema."
+        );
+        return NextResponse.json({ ok: false, reply: friendly });
       }
 
-      const date = typeof parsed.date === "string" && parsed.date ? parsed.date : defaultDate;
-
-      const availability = await fetchAvailability(baseUrl, business.id, chosenService.id, date);
+      const date = parsed.date || defaultDate;
+      const availability = await fetchAvailability(
+        baseUrl,
+        business.id,
+        chosenService.id,
+        date
+      );
 
       if (!availability || availability.length === 0) {
-        return NextResponse.json({
-          ok: true,
-          modelOutput: modelOutput ?? parsed,
-          reply: `Não encontrei horários disponíveis para ${chosenService.name} em ${date}. Vamos tentar outro dia?`,
-        });
+        const friendly = await generateFriendlyReply(
+          `Não encontrei horários disponíveis para ${chosenService.name} em ${date}.`
+        );
+        return NextResponse.json({ ok: true, reply: friendly });
       }
 
       const formatter = new Intl.DateTimeFormat("pt-BR", {
@@ -227,39 +247,40 @@ export async function POST(req: NextRequest) {
         minute: "2-digit",
       });
 
-      const firstSlots = availability.slice(0, 4).map(slot => {
-        const start = typeof slot === "string" ? slot : slot.start || slot.time;
-        const slotDate = start ? new Date(start) : null;
-        return slotDate ? `• ${formatter.format(slotDate)}` : "";
-      }).filter(Boolean);
+      const firstSlots = availability
+        .slice(0, 4)
+        .map(slot => {
+          const start =
+            typeof slot === "string" ? slot : slot.start || slot.time;
+          const d = start ? new Date(start) : null;
+          return d ? formatter.format(d) : "";
+        })
+        .filter(Boolean)
+        .join(", ");
 
-      return NextResponse.json({
-        ok: true,
-        modelOutput: modelOutput ?? parsed,
-        reply:
-          `Aqui estão os próximos horários para ${chosenService.name} em ${date}:\n` +
-          firstSlots.join("\n") +
-          `\nResponda com o horário desejado para agendar.`,
-      });
+      const baseMessage = `Horários disponíveis para ${chosenService.name} em ${date}: ${firstSlots}.`;
+      const friendly = await generateFriendlyReply(baseMessage);
+
+      return NextResponse.json({ ok: true, reply: friendly });
     }
 
+    // ---- Create Booking ----
     if (parsed.intent === "create_booking") {
-      return NextResponse.json({
-        ok: true,
-        modelOutput: modelOutput ?? parsed,
-        reply: `Perfeito! Vou preparar o agendamento para ${parsed.date || "o próximo horário disponível"}. (Integração de agendamento em breve.)`,
-      });
+      const baseMessage = `Perfeito! Vamos confirmar o agendamento para ${parsed.service || "o serviço desejado"} em ${parsed.date || "um dos próximos horários disponíveis"}. (Integração em breve)`;
+      const friendly = await generateFriendlyReply(baseMessage);
+      return NextResponse.json({ ok: true, reply: friendly });
     }
 
-    return NextResponse.json({
-      ok: true,
-      modelOutput: modelOutput ?? parsed,
-      reply:
-        "Oi! Posso te mostrar nossos serviços, horários disponíveis e fazer reservas. Pergunte algo como: \"Vocês têm horário para corte amanhã?\"",
-    });
+    // ---- Small Talk or Unknown ----
+    const fallback = await generateFriendlyReply(
+      "Oi! Posso te ajudar com horários, serviços e reservas. Pergunte algo como: 'Vocês têm horário pra corte amanhã?'"
+    );
+    return NextResponse.json({ ok: true, reply: fallback });
   } catch (err) {
     console.error(err);
-    return NextResponse.json({ ok: false, error: "server error" }, { status: 500 });
+    return NextResponse.json(
+      { ok: false, error: "server error" },
+      { status: 500 }
+    );
   }
 }
-
