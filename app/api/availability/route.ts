@@ -2,10 +2,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { supabase } from "@/lib/supabaseClient";
 
-function toISO(date: string, time: string) {
-  return new Date(`${date}T${time}:00`).toISOString();
-}
-
 export async function GET(req: NextRequest) {
   const { searchParams } = new URL(req.url);
   const businessId = searchParams.get("business_id");
